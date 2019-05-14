@@ -1,0 +1,167 @@
+#!/usr/bin/bash
+
+# VARIABLE INIT
+PROG="texer"
+MODE="draft"
+FILE="NONE"
+LOG="log.txt"
+GARBAGE="*.aux *.nls *.log *.ilg *.nlo *~ *.bbl *.blg *.out *.toc *.bcf *.run.xml $LOG"
+SECOND_DONE="NO"
+
+
+## FUNCTIONS
+show_log_and_exit() {
+  cat $LOG
+  echo -e "\nImportant bit:"
+  grep Error log.txt
+  rm $LOG
+  exit 1
+}
+
+show_log() {
+  cat $LOG
+}
+
+usage() {
+    echo ""
+    echo " $PROG is a pdf document compiler."
+    echo " Usage is: "
+    echo "   $PROG [--compress] <file>"
+    echo ""
+}
+
+usage_and_exit() {
+  usage && exit 1
+}
+
+
+
+
+## Options parsing
+
+while [[ $# -gt 0 ]]
+do
+  key="$1"
+  echo $key
+  
+  case $key in
+    -c|--compress)
+      MODE="compress"
+      shift
+      ;;
+    *)
+      if [[ $FILE = "NONE" ]]
+      then
+        FILE=$key
+      else
+        echo "Only one file at a time!"
+        usage_and_exit
+      fi
+      shift
+      ;;
+  esac
+done
+
+if [[ $FILE = "NONE" ]]
+then
+  echo "Need to specify a file!"
+  usage_and_exit
+fi
+
+## Check if in same location as file to be compiled.
+BFILE=$(basename -- "$FILE")
+if [[ $FILE != $BFILE ]]
+then
+  echo "!!> Error: $PROG must be run from same directory as file."
+  exit 1
+fi
+
+## Check extension
+EXT="${FILE##*.}"
+FILE_NOEX="${FILE%.*}"
+
+if [[ $EXT != "tex" && $(command -v pandoc &> /dev/null; echo $?) != 0 ]]
+then
+  echo "!!> Error: pandoc is required to compile non-latex files."
+  exit 1
+fi
+
+case $EXT in
+  "tex")
+    ;;
+  "md")
+    echo "--> Generating LaTeX file from markdown"
+    pandoc $FILE -t latex -s -o $FILE_NOEX.tex
+    FILE=$FILE_NOEX.tex
+    GARBAGE="$GARBAGE $FILE"
+    ;;
+  *)
+    echo "!!> Error: unknown extension '$EXT'"
+    echo "    Only .tex and .md files are supported."
+    exit 1
+    ;;
+esac
+
+TEXEX=lualatex
+TEXOPTS="-interaction=nonstopmode --shell-escape"
+TEXCMD="${TEXEX} ${TEXOPTS}"
+
+if [[ $(command -v $TEXEX &> /dev/null; echo $?) != 0 ]]
+then
+  echo "!!> Error: $TEXEX is required to compile LaTeX."
+fi
+
+echo "--> First compilation"
+$TEXCMD $FILE &> $LOG || show_log_and_exit
+
+
+if [ -f ${FILE_NOEX}.nlo ]; then
+  (makeindex ${FILE_NOEX}.nlo -s nomencl.ist -o ${FILE_NOEX}.nls &> $LOG && \
+    $TEXCMD $FILE &>/dev/null && \
+    SECOND_DONE="YES" && \
+    echo '--> Nomenclature generated') || \
+    (echo '--> Warning: could not generate nomenclature' && show_log)
+fi
+
+if [ $(grep bibstyle ${FILE_NOEX}.aux &> /dev/null; echo $?) = 0 ]; then
+  (bibtex ${FILE_NOEX} &> $LOG && \
+    $TEXCMD $FILE &>/dev/null && \
+    $TEXCMD $FILE &>/dev/null && \
+    SECOND_DONE="YES" && \
+    echo '--> Bibliography generated (bibtex)') || \
+    (echo '--> Warning: could not generate bibliography' && show_log)
+fi
+
+if [ -f ${FILE_NOEX}.bcf ]; then
+  if command -v "biber" &> /dev/null; then
+    (biber ${FILE_NOEX} &> $LOG && \
+      $TEXCMD $FILE &>/dev/null && \
+      $TEXCMD $FILE &>/dev/null && \
+      SECOND_DONE="YES" && \
+      echo '--> Bibliography generated (biber)') || \
+      (echo '--> Warning: could not generate bibliography' && show_log)
+  else
+    echo '--> Error: "biber" not found!'
+    echo '--> Warning: could not generate bibliography:' && show_log
+  fi
+fi
+
+if [[ ${SECOND_DONE} = "NO" ]]; then
+    echo "--> Second compilation"
+    $TEXCMD $FILE &> $LOG || show_log_and_exit
+fi
+
+if [[ $MODE = "compress" ]]; then
+    ORIG_SZ=$(du -m "$FILE_NOEX.pdf" | cut -f1)
+    echo "--> Compressing PDF"
+    gs -sDEVICE=pdfwrite -dCompatibilityLevel=1.4 -dNOPAUSE -dQUIET -dBATCH -sOutputFile=${FILE_NOEX}-compressed.pdf ${FILE_NOEX}.pdf
+    mv $FILE_NOEX-compressed.pdf ${FILE_NOEX}.pdf
+    NEW_SZ=$(du -m "$FILE_NOEX.pdf" | cut -f1)
+    echo "--> PDF shrunk from ${ORIG_SZ}MB to ${NEW_SZ}MB"
+fi
+
+
+echo "--> Cleaning up"
+rm -rf $GARBAGE
+
+echo "--> Compilation complete! Pdf output to '${FILE_NOEX}.pdf'"
