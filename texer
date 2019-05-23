@@ -5,8 +5,7 @@ PROG="texer"
 MODE="draft"
 FILE="NONE"
 LOG="log.txt"
-GARBAGE="*.aux *.nls *.log *.ilg *.nlo *~ *.bbl *.blg *.out *.toc *.bcf *.run.xml $LOG"
-SECOND_DONE="NO"
+SECOND_NEEDED="FALSE"
 
 
 ## FUNCTIONS
@@ -34,15 +33,47 @@ usage_and_exit() {
   usage && exit 1
 }
 
+gen_nomenclature() {
+  if [ -f "$FILE_NOEX.nlo" ]; then
+    makeindex "$FILE_NOEX.nlo" -s nomencl.ist -o "$FILE_NOEX.nls" &> $LOG || (nomenclfailed && return)
+    SECOND_NEEDED="TRUE"
+    echo "--> Nomenclature generated"
+  fi
+}
 
+nomenclfailed() {
+  echo "--> Warning: could not generate nomenclature" && show_log
+}
+
+gen_bibliography() {
+  if [ "$(grep bibstyle "$FILE_NOEX.aux" &> /dev/null; echo $?)" -eq 0 ]; then
+    bibtex "$FILE_NOEX" &> $LOG || (bibfailed && return)
+    SECOND_NEEDED="TRUE"
+    echo "--> Bibliography generated (bibtex)"
+    return
+  fi
+  if [ -f "$FILE_NOEX.bcf" ]; then
+    if command -v "biber" &> /dev/null; then
+      biber "$FILE_NOEX" &> $LOG || (bibfailed && return)
+      SECOND_NEEDED="TRUE"
+      echo '--> Bibliography generated (biber)'
+      return
+    else
+      echo '--> Warning: "biber" not found!'
+      bibfailed && return
+    fi
+  fi
+}
+
+bibfailed() {
+    echo "--> Warning: could not generate bibliography" && show_log
+}
 
 
 ## Options parsing
-
 while [[ $# -gt 0 ]]
 do
   key="$1"
-  echo $key
   
   case $key in
     -c|--compress)
@@ -69,9 +100,10 @@ then
 fi
 
 ## Check if in same location as file to be compiled.
-BFILE=$(basename -- "$FILE")
-if [[ $FILE != $BFILE ]]
+FILE_DIR=$(realpath "$(dirname "$FILE")")
+if [[ "$PWD" != "$FILE_DIR" ]]
 then
+  echo "$PWD" "$FILE_DIR"
   echo "!!> Error: $PROG must be run from same directory as file."
   exit 1
 fi
@@ -91,7 +123,7 @@ case $EXT in
     ;;
   "md")
     echo "--> Generating LaTeX file from markdown"
-    pandoc $FILE -t latex -s -o $FILE_NOEX.tex
+    pandoc "$FILE" -t latex -s -o "$FILE_NOEX.tex"
     FILE=$FILE_NOEX.tex
     GARBAGE="$GARBAGE $FILE"
     ;;
@@ -105,6 +137,7 @@ esac
 TEXEX=lualatex
 TEXOPTS="-interaction=nonstopmode --shell-escape"
 TEXCMD="${TEXEX} ${TEXOPTS}"
+DRAFTTEXCMD="$TEXCMD -draftmode"
 
 if [[ $(command -v $TEXEX &> /dev/null; echo $?) != 0 ]]
 then
@@ -112,56 +145,31 @@ then
 fi
 
 echo "--> First compilation"
-$TEXCMD $FILE &> $LOG || show_log_and_exit
+$DRAFTTEXCMD "$FILE" &> $LOG || show_log_and_exit
 
+gen_nomenclature
+gen_bibliography
 
-if [ -f ${FILE_NOEX}.nlo ]; then
-  (makeindex ${FILE_NOEX}.nlo -s nomencl.ist -o ${FILE_NOEX}.nls &> $LOG && \
-    $TEXCMD $FILE &>/dev/null && \
-    SECOND_DONE="YES" && \
-    echo '--> Nomenclature generated') || \
-    (echo '--> Warning: could not generate nomenclature' && show_log)
-fi
-
-if [ $(grep bibstyle ${FILE_NOEX}.aux &> /dev/null; echo $?) = 0 ]; then
-  (bibtex ${FILE_NOEX} &> $LOG && \
-    $TEXCMD $FILE &>/dev/null && \
-    $TEXCMD $FILE &>/dev/null && \
-    SECOND_DONE="YES" && \
-    echo '--> Bibliography generated (bibtex)') || \
-    (echo '--> Warning: could not generate bibliography' && show_log)
-fi
-
-if [ -f ${FILE_NOEX}.bcf ]; then
-  if command -v "biber" &> /dev/null; then
-    (biber ${FILE_NOEX} &> $LOG && \
-      $TEXCMD $FILE &>/dev/null && \
-      $TEXCMD $FILE &>/dev/null && \
-      SECOND_DONE="YES" && \
-      echo '--> Bibliography generated (biber)') || \
-      (echo '--> Warning: could not generate bibliography' && show_log)
-  else
-    echo '--> Error: "biber" not found!'
-    echo '--> Warning: could not generate bibliography:' && show_log
-  fi
-fi
-
-if [[ ${SECOND_DONE} = "NO" ]]; then
+if [[ "$SECOND_NEEDED" != "TRUE" ]]; then
     echo "--> Second compilation"
-    $TEXCMD $FILE &> $LOG || show_log_and_exit
+    $DRAFTTEXCMD "$FILE" &> "$LOG" || show_log_and_exit
 fi
+
+echo "--> Final compilation"
+$TEXCMD "$FILE" &> "$LOG" || show_log_and_exit
+
 
 if [[ $MODE = "compress" ]]; then
     ORIG_SZ=$(du -m "$FILE_NOEX.pdf" | cut -f1)
     echo "--> Compressing PDF"
-    gs -sDEVICE=pdfwrite -dCompatibilityLevel=1.4 -dNOPAUSE -dQUIET -dBATCH -sOutputFile=${FILE_NOEX}-compressed.pdf ${FILE_NOEX}.pdf
-    mv $FILE_NOEX-compressed.pdf ${FILE_NOEX}.pdf
+    gs -sDEVICE=pdfwrite -dCompatibilityLevel=1.4 -dNOPAUSE -dQUIET -dBATCH -sOutputFile="$FILE_NOEX-compressed.pdf" "$FILE_NOEX.pdf"
+    mv "$FILE_NOEX-compressed.pdf" "${FILE_NOEX}.pdf"
     NEW_SZ=$(du -m "$FILE_NOEX.pdf" | cut -f1)
     echo "--> PDF shrunk from ${ORIG_SZ}MB to ${NEW_SZ}MB"
 fi
 
 
 echo "--> Cleaning up"
-rm -rf $GARBAGE
+rm -rf ./*.aux ./*.nls ./*.log ./*.ilg ./*.nlo ./*~ ./*.bbl ./*.blg ./*.out ./*.toc ./*.bcf ./*.run.xml "$LOG"
 
 echo "--> Compilation complete! Pdf output to '${FILE_NOEX}.pdf'"
