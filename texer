@@ -99,6 +99,10 @@ then
   usage_and_exit
 fi
 
+
+echo "TODO: BUG WITH BIBLIO COMPILATION"
+
+
 ## Check if in same location as file to be compiled.
 FILE_DIR=$(realpath "$(dirname "$FILE")")
 if [[ "$PWD" != "$FILE_DIR" ]]
